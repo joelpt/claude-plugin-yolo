@@ -35,7 +35,7 @@ Each entry: `- [ ] [BLOCKING|NON-BLOCKING] short description` plus indented `Con
 
 After every commit (always via `/commit-commands:commit`) print one line:
 
-```
+```text
 ∴ USER TODOs: N pending — [item1], [item2], ...
 ```
 
@@ -46,6 +46,7 @@ or `∴ USER TODOs: 0`.
 At the very start of a /yolo run, before any other work, read USER_TODO.md at project root.
 
 If it has pending items needing user attention, front-load the interactive interview FIRST:
+
 - Walk every pending item via AskUserQuestion
 - Surface relevant Context inline (don't make the user open the file)
 - Present item Options plus obvious additional choices as selectable answers
@@ -57,6 +58,38 @@ If it has pending items needing user attention, front-load the interactive inter
 
 If the user says they're present or asks to go through USER_TODOs, switch to interactive mode and walk every pending USER_TODO via AskUserQuestion, then resume autonomous mode.
 
+### Session Initialization
+
+Once the startup gate clears, before entering the per-item loop, initialize durable task tracking:
+
+1. Enumerate every pending work item from the prioritized sources into a JSON array.
+   Each item: `{"source_id": "<gh#N|todo:First line|plan:Phase N|description>", "description": "<one-liner>"}`.
+2. Initialize (or merge) the task list:
+
+   ```bash
+   printf '%s' '[{"source_id":"gh#1","description":"..."},...]' | \
+     python3 ~/.claude/hooks/update-yolo-progress.py \
+       --work-dir "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" \
+       init 2>/dev/null || true
+   ```
+
+3. Read the assigned tids so you can reference them throughout:
+
+   ```bash
+   python3 ~/.claude/hooks/update-yolo-progress.py task-list --format json 2>/dev/null || echo '[]'
+   ```
+
+   Store the mapping of `source_id → tid` in working memory for the session.
+
+If new work is discovered mid-session, register it immediately:
+
+```bash
+python3 ~/.claude/hooks/update-yolo-progress.py \
+  task-add --source-id "gh#42" --description "one-liner" 2>/dev/null || true
+```
+
+This prints the new tid to stdout — capture it. Also call `task-update --tid <new-tid> --status aborted --outcome "Deferred: <reason>"` immediately for any item you know won't be worked this session (blocked on user input, depends on unfinished prerequisite, etc.).
+
 ### Blocked Work
 
 Note in USER_TODO.md, find parallel work (different feature/platform/docs/mocked tests) and continue there.
@@ -65,17 +98,52 @@ This counts as goal reached.
 
 ### Per-Item Loop
 
-0. **Pulse yolo progress**: at the very start of each item iteration, before doing any work, run `python3 ~/.claude/hooks/update-yolo-progress.py C R 2>/dev/null || true` where `C` = items completed so far this session and `R` = estimated items remaining including the current one. Keeps the statusline alive mid-task. C and R may regress (e.g. a reverted change decrements C, a newly discovered issue increments R) — always pass the current counts.
-1. Make a judgment call and do the work
-2. Verify (tests/output/smoke as applicable)
-3. Use `/rca` on second failure, `/think` on complex root causes
-4. Route blockers into USER_TODO.md
-5. Update the work-tracking source (check off TODO.md / close-or-comment GH issue / update PLAN.md)
-6. Commit via `/commit-commands:commit`
-6.5. **Write yolo progress**: count items completed this session (`C`) and items visibly remaining (`R`). Run `python3 ~/.claude/hooks/update-yolo-progress.py C R 2>/dev/null || true`.
-7. Print the USER TODO count line
+For each task (referenced by its `tid`):
 
-Multi-step items: mark `[WIP]` in TODO.md or post a progress comment on the GH issue so the session can resume cleanly.
+0. **Mark in-progress**:
+
+   ```bash
+   python3 ~/.claude/hooks/update-yolo-progress.py \
+     task-update --tid "$TID" --status in_progress 2>/dev/null || true
+   ```
+
+1. Make a judgment call and do the work.
+2. Verify (tests/output/smoke as applicable).
+3. Use `/rca` on second failure, `/think` on complex root causes.
+4. Route blockers into USER_TODO.md. If a task cannot be completed, mark it aborted now:
+
+   ```bash
+   python3 ~/.claude/hooks/update-yolo-progress.py \
+     task-update --tid "$TID" --status aborted \
+     --outcome "Blocked: <reason>" 2>/dev/null || true
+   ```
+
+5. Update the work-tracking source (check off TODO.md / close-or-comment GH issue / update PLAN.md).
+6. Commit via `/commit-commands:commit`.
+6.5. **Persist task outcome** (immediately after commit):
+
+   ```bash
+   python3 ~/.claude/hooks/update-yolo-progress.py \
+     task-update --tid "$TID" \
+     --status completed \
+     --commit "$(git rev-parse --short HEAD 2>/dev/null || echo '')" \
+     --outcome "<one or two sentence outcome, including any notable follow-ups>" \
+     --capture-diff 2>/dev/null || true
+   ```
+
+7. Print the USER TODO count line.
+
+Multi-step items: mark `[WIP]` in TODO.md or post a progress comment on the GH issue; leave the task `in_progress` in the JSON until the final commit for that item.
+
+### PreCompact Correctness Sweep
+
+When the PreCompact hook fires, a directive is preserved in the compaction summary. After compaction completes, you will see instructions to reconcile task state. **Do this immediately before resuming work**:
+
+1. Run `python3 ~/.claude/hooks/update-yolo-progress.py task-list --format json` and read the current state.
+2. For each task whose JSON `status` is `in_progress` or `not_started` but which you know from the compacted context is actually `completed` or `aborted`, call `task-update` to correct it (with `--commit` and `--capture-diff` if applicable).
+3. For any work referenced in the summary that is not in the JSON, call `task-add` then `task-update` to register it.
+
+This is the mechanism by which long sessions retain accurate history across compactions. Do not skip it.
 
 ### Goal State
 
@@ -85,14 +153,32 @@ USER_TODO.md captures everything waiting on the human.
 
 When goal state is reached:
 
-1. **Remove progress entry**: run `python3 ~/.claude/hooks/update-yolo-progress.py --remove 2>/dev/null || true` to clear the statusline `Y:N%` immediately (the `SessionEnd` hook handles this as a safety net, but do it here for instant feedback).
-2. **Print the recap** as a short prose summary — not a fenced code block. Open with a bold `/yolo recap:` line, then a handful of labeled bullets. Be a bit more expansive than a bare list:
-   - **Done** — what got completed this session. Name each item when there are ≤6; otherwise give a count plus a one-line characterization (e.g. "8 items across GitHub Issues and TODO.md").
+1. **Mark the session complete**:
+
+   ```bash
+   python3 ~/.claude/hooks/update-yolo-progress.py complete 2>/dev/null || true
+   ```
+
+   The entry is retained for 14 days. The statusline `Y:c/r` cell clears once `session_end` is set.
+
+2. **Build the recap from the JSON**:
+
+   ```bash
+   python3 ~/.claude/hooks/update-yolo-progress.py task-list --format json
+   ```
+
+   Use that as the authoritative source — not memory. Open with a bold `/yolo recap:` line, then labeled bullets:
+
+   - **Done** — name each completed item (use `description` field) when there are ≤6; otherwise give a count plus a one-line characterization. Include commit sha where recorded.
    - **Verified** — how completion was checked (tests, smoke runs, builds); call out anything left unverified.
-   - **Blocked** — items halted on BLOCKING USER_TODOs, each with its reason. Omit the bullet if there are none.
+   - **Blocked** — items with `status: "aborted"` and their `outcome` prose. Omit bullet if none.
    - **Surfaced** — new USER_TODO.md entries added this session. Omit if none.
-   - **Commits & sources** — the commit count and which work sources were used.
+   - **Commits & sources** — count of distinct commits recorded, which sources were used.
+   - **Session duration** — derive from `session_start` to `session_end` if available.
    - **Follow-ups** — anything the user should know or do next. Omit if none.
+
+3. If lines_added/lines_deleted are recorded for any task, include a total at the end of the recap:
+   `Lines changed: +N / -M across N tasks`.
 
 Then explicitly state: **"∴ Goal state reached — all completable work done."**
 

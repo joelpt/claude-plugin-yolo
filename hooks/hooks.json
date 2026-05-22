@@ -20,6 +20,14 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/precompact-yolo-sync.sh", "timeout": 5 }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "matcher": "*",
