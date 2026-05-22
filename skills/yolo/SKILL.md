@@ -86,16 +86,15 @@ USER_TODO.md captures everything waiting on the human.
 When goal state is reached:
 
 1. **Remove progress entry**: run `python3 ~/.claude/hooks/update-yolo-progress.py --remove 2>/dev/null || true` to clear the statusline `Y:N%` immediately (the `SessionEnd` hook handles this as a safety net, but do it here for instant feedback).
-2. **Print recap** in this format (then explicitly state the goal-state line):
+2. **Print the recap** as a short prose summary — not a fenced code block. Open with a bold `/yolo recap:` line, then a handful of labeled bullets. Be a bit more expansive than a bare list:
+   - **Done** — what got completed this session. Name each item when there are ≤6; otherwise give a count plus a one-line characterization (e.g. "8 items across GitHub Issues and TODO.md").
+   - **Verified** — how completion was checked (tests, smoke runs, builds); call out anything left unverified.
+   - **Blocked** — items halted on BLOCKING USER_TODOs, each with its reason. Omit the bullet if there are none.
+   - **Surfaced** — new USER_TODO.md entries added this session. Omit if none.
+   - **Commits & sources** — the commit count and which work sources were used.
+   - **Follow-ups** — anything the user should know or do next. Omit if none.
 
-```
-/yolo recap:
-  Done (N): item-1, item-2, ...   ← list names when ≤6 total items, else "N items (GitHub Issues, TODO.md)"
-  Blocked (M): item-4 (reason)    ← omit line entirely if M=0
-  Commits: X | Sources: <sources actually used>
-```
-
-Explicitly state: **"∴ Goal state reached — all completable work done."**
+Then explicitly state: **"∴ Goal state reached — all completable work done."**
 
 > The `Stop` completion gate (this plugin's `hooks/yolo-completion-gate.sh`) blocks the
 > session from ending until the recent transcript shows `Goal state reached` or a
