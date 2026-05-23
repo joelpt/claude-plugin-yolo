@@ -22,11 +22,10 @@ transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/nul
 # Not a /yolo session -> allow Stop silently (zero cost for every other session).
 grep -q 'command-name>/yolo' "$transcript" || exit 0
 
-# /yolo session: allow Stop only when the recent transcript shows goal state.
-# The skill is required to print a "/yolo recap:" block and an explicit line
-# ending "all completable work done" when (and only when) the run is complete.
-recent=$(tail -c 131072 "$transcript" 2>/dev/null || true)
-if printf '%s' "$recent" | grep -qE 'all completable work done|/yolo recap:'; then
+# /yolo session: allow Stop only when the transcript shows goal state anywhere.
+# Searching the full transcript (not just a tail) handles long sessions where the
+# recap was printed earlier than the last 128KB window.
+if grep -qE 'all completable work done|/yolo recap:' "$transcript" 2>/dev/null; then
     exit 0
 fi
 
