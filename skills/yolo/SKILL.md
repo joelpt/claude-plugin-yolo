@@ -180,6 +180,18 @@ When goal state is reached:
 3. If lines_added/lines_deleted are recorded for any task, include a total at the end of the recap:
    `Lines changed: +N / -M across N tasks`.
 
+4. **Surface orphaned worktrees** (visibility only — no auto-action):
+
+   ```bash
+   git worktree list --porcelain 2>/dev/null \
+     | awk '/^worktree / { wt=substr($0,10) } /^branch refs\/heads\// { br=substr($0,19); print wt "|" br }' \
+     | grep "$(git rev-parse --show-toplevel)/.claude/worktrees/" || true
+   ```
+
+   For each match, append a recap bullet:
+   `**Pending worktree cleanup** — N orphaned bot worktree(s) under .claude/worktrees/. Run `/rmws` from inside each, or enable the SessionEnd janitor (touch .claude/yolo-janitor.enabled) to auto-cleanup merged-and-clean ones older than 24h.`
+   Omit the bullet if zero orphans.
+
 Then explicitly state: **"∴ Goal state reached — all completable work done."**
 
 > The `Stop` completion gate (this plugin's `hooks/yolo-completion-gate.sh`) blocks the
