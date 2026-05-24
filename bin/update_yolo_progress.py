@@ -533,9 +533,8 @@ def cmd_complete(
 ) -> None:
     """Mark this session as completed or aborted; set session_end.
 
-    Once status is 'completed' the entry is frozen — further calls are no-ops.
-    Any non-completed status (in_flight, aborted) may still transition, and
-    session_end is updated alongside to record the actual transition time.
+    Only transitions from 'in_flight'. Both 'completed' and 'aborted' are
+    terminal — a second call on either is a no-op for status and session_end.
     The entry is never deleted here — the SessionStart prune sweep handles
     retention cleanup after 14 days.
 

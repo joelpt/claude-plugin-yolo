@@ -145,13 +145,17 @@ class LegacyPulseTests(unittest.TestCase):
         data = _load(self.root)
         self.assertEqual(data[SESSION]["percent"], 33)
 
-    def test_corrupt_file_is_overwritten(self) -> None:
+    def test_corrupt_file_is_renamed_and_replaced(self) -> None:
+        """Corrupt file is preserved as .corrupt-* and a fresh file is written."""
         claude_dir = self.root / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)
-        (claude_dir / "yolo-progress.json").write_text("not valid json{{")
+        pfile = claude_dir / "yolo-progress.json"
+        pfile.write_text("not valid json{{")
         _run(self.root, "2", "3")
         data = _load(self.root)
         self.assertIn(SESSION, data)
+        corrupt_siblings = list(claude_dir.glob("yolo-progress.json.corrupt-*"))
+        self.assertEqual(len(corrupt_siblings), 1, "corrupt file should be preserved as .corrupt-* sibling")
 
     def test_legacy_pulse_does_not_overwrite_task_cr(self) -> None:
         tasks = [{"source_id": "gh#1", "description": "thing"}]
