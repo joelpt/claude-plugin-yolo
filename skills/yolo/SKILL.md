@@ -68,9 +68,7 @@ Once the startup gate clears, before entering the per-item loop, initialize dura
 
    ```bash
    printf '%s' '[{"source_id":"gh#1","description":"..."},...]' | \
-     python3 ~/.claude/hooks/update-yolo-progress.py \
-       --work-dir "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" \
-       init 2>/dev/null || true
+     python3 ~/.claude/hooks/update-yolo-progress.py init 2>/dev/null || true
    ```
 
 3. Read the assigned tids so you can reference them throughout:
@@ -137,13 +135,36 @@ Multi-step items: mark `[WIP]` in TODO.md or post a progress comment on the GH i
 
 ### PreCompact Correctness Sweep
 
-When the PreCompact hook fires, a directive is preserved in the compaction summary. After compaction completes, you will see instructions to reconcile task state. **Do this immediately before resuming work**:
+After each compaction, **do this before resuming work**:
 
-1. Run `python3 ~/.claude/hooks/update-yolo-progress.py task-list --format json` and read the current state.
-2. For each task whose JSON `status` is `in_progress` or `not_started` but which you know from the compacted context is actually `completed` or `aborted`, call `task-update` to correct it (with `--commit` and `--capture-diff` if applicable).
-3. For any work referenced in the summary that is not in the JSON, call `task-add` then `task-update` to register it.
+**If a `YOLO_TASK_STATE_BEGIN / YOLO_TASK_STATE_END` block appears at the top of your context** (the PreCompact hook may have instructed the summarizer to embed it), it looks like:
 
-This is the mechanism by which long sessions retain accurate history across compactions. Do not skip it.
+```text
+YOLO_TASK_STATE_BEGIN
+{"tasks":[{"tid":"t1","source_id":"gh#42","status":"completed","outcome":"...","commit":"abc1234"},
+          {"tid":"t2","source_id":"todo:Refactor auth","status":"in_progress","outcome":null,"commit":null}],
+ "notes":"..."}
+YOLO_TASK_STATE_END
+```
+
+Parse the JSON and call `task-update` for each entry — the block was extracted from the pre-compaction context before detail was lost, so it is authoritative for what was seen in that window:
+
+```bash
+python3 ~/.claude/hooks/update-yolo-progress.py task-update \
+    --tid t1 --status completed --outcome "one sentence" --commit abc1234
+```
+
+For any task whose `tid` is unknown, `task-add` it first, then `task-update`.
+
+**Whether or not the block appears**, also run:
+
+```bash
+python3 ~/.claude/hooks/update-yolo-progress.py task-list --format json
+```
+
+Compare the JSON state to whatever task detail survives in context. For any task whose durable status is `in_progress` or `not_started` but which you recall completing, call `task-update` to correct it. The JSON file is always the reconciliation target — the block (if present) supplements it with pre-compaction accuracy; the file is the authoritative record.
+
+The per-step `task-update` calls at step 6.5 are the primary accuracy mechanism; this sweep is the safety net for any that were missed. Do not skip it.
 
 ### Goal State
 
@@ -159,7 +180,7 @@ When goal state is reached:
    python3 ~/.claude/hooks/update-yolo-progress.py complete 2>/dev/null || true
    ```
 
-   The entry is retained for 14 days. The statusline `Y:c/r` cell clears once `session_end` is set.
+   The entry is retained for 14 days. The statusline shows `Y:c/r` (e.g. `Y:15/15`) even after completion.
 
 2. **Build the recap from the JSON**:
 

@@ -24,7 +24,7 @@ helper="${HOME}/.claude/hooks/update-yolo-progress.py"
 
 [[ -f "$helper" ]] || exit 0
 
-python3 "$helper" --work-dir "$project_dir" complete --abort-if-incomplete \
+python3 "$helper" complete --abort-if-incomplete \
     2>/dev/null || true
 
 ############################################################

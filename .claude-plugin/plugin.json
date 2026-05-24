@@ -1,6 +1,6 @@
 {
   "name": "yolo",
-  "version": "2026.05.24.1",
+  "version": "2026.05.24.2",
   "description": "Autonomous work mode: /yolo:yolo works all pending items (GitHub issues, TODO.md, PLAN.md) sequentially without pausing for decisions, committing as it goes. Deterministic Stop completion gate; statusline progress pulse.",
   "author": {
     "name": "Joel Thornton",

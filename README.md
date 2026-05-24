@@ -7,7 +7,7 @@ Autonomous work mode for Claude Code. Invoke `/yolo:yolo` and Claude works every
 - **`/yolo:yolo`** — enters autonomous mode. Claude picks work from the highest-priority source (GitHub issues → `TODO.md` → `PLAN.md`/`README.md`), does each item, verifies, commits, and repeats until everything completable is done.
 - **`USER_TODO.md`** — anything Claude can't safely decide alone (irreversible ops, secrets, personal-preference calls) is routed here instead of guessed. A startup interview front-loads any pending items.
 - **Stop completion gate** — a `Stop` hook blocks the session from ending while a `/yolo` run is in progress and has not yet declared goal state. See below.
-- **Statusline progress pulse** — after each item (and at the start of each loop) Claude writes `{percent, updated}` to the project's `.claude/yolo-progress.json`, keyed by session id, which the statusline can render as `Y:N%`.
+- **Statusline progress pulse** — durable task state is recorded in `~/.claude/yolo-progress.json` (global, shared across projects), keyed by session id. The statusline renders it as `Y:c/r` (e.g. `Y:12/15`), staying visible as `Y:15/15` even after the session completes.
 
 ## Plugin layout
 
@@ -17,7 +17,7 @@ skills/yolo/SKILL.md                the /yolo:yolo skill — autonomous-mode ins
 commands/yolo.md                    /yolo:yolo slash command (invokes the skill + /loop)
 hooks/hooks.json                    SessionStart, SessionEnd, Stop wiring
 hooks/sessionstart-yolo-cleanup.sh  prune stale progress entries; heal helper symlink
-hooks/sessionend-yolo-cleanup.sh    remove this session's progress entry
+hooks/sessionend-yolo-cleanup.sh    mark this session complete/aborted in progress JSON
 hooks/yolo-completion-gate.sh       Stop gate — blocks until goal state reached
 bin/update_yolo_progress.py         helper: write/remove a session's progress entry
 tests/test_update_yolo_progress.py  unit tests for the helper

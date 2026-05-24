@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """YOLO session progress and task tracker.
 
-Manages per-session task state in <git-root>/.claude/yolo-progress.json.
-Provides durable task tracking that survives context compaction.
+Manages per-session task state in ~/.claude/yolo-progress.json (global, shared
+across all projects). Lock file lives alongside at ~/.claude/yolo-progress.json.lock.
 
 Reads CLAUDE_CODE_SESSION_ID from the environment; silently exits 0 if unset.
 
 Global option (must precede subcommand):
-  --work-dir DIR   Override git-root detection with an explicit directory.
+  --work-dir DIR   Override git-root detection for git operations (capture-diff,
+                   work_dir field). Does NOT affect the progress file path.
 
 Usage:
   update_yolo_progress.py [--work-dir D] C R          # legacy c/r pulse (no-task mode)
@@ -23,6 +24,11 @@ Usage:
   update_yolo_progress.py [--work-dir D] remove
   update_yolo_progress.py [--work-dir D] prune
       [--cutoff-completed-days N] [--cutoff-inflight-days N]
+
+Field semantics:
+  c       — count of tasks with status 'completed'
+  r       — TOTAL task count for this session (c + not_started + in_progress + aborted)
+  percent — round(c / r * 100); 0 when r == 0
 """
 
 from __future__ import annotations
@@ -95,16 +101,15 @@ def git_root() -> Path:
         return Path.cwd()
 
 
-def progress_file(work_dir: Path) -> Path:
-    """Return the canonical path to this project's yolo-progress.json.
+def progress_file() -> Path:
+    """Return the canonical path to the global yolo-progress.json.
 
-    Args:
-        work_dir: The git root or project directory.
+    Always ~/.claude/yolo-progress.json regardless of project or cwd.
 
     Returns:
         Absolute path to the progress JSON file.
     """
-    return work_dir / ".claude" / "yolo-progress.json"
+    return Path.home() / ".claude" / "yolo-progress.json"
 
 
 def _now() -> str:
@@ -141,7 +146,7 @@ def _locked(path: Path) -> Generator[None, None, None]:
     """
     lock_path = path.parent / (path.name + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as lf:
+    with open(lock_path, "a") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             yield
@@ -150,7 +155,10 @@ def _locked(path: Path) -> Generator[None, None, None]:
 
 
 def load(path: Path) -> ProgressData:
-    """Load and return the progress data, returning {} on any read/parse error.
+    """Load and return the progress data, preserving a corrupt file before returning {}.
+
+    On JSONDecodeError the corrupt file is renamed to ``<name>.corrupt-<ts>``
+    so that a subsequent save does not silently wipe history.
 
     Args:
         path: Path to the yolo-progress.json file.
@@ -160,7 +168,17 @@ def load(path: Path) -> ProgressData:
     """
     try:
         return cast(ProgressData, json.loads(path.read_text()))
-    except (json.JSONDecodeError, OSError, FileNotFoundError):
+    except json.JSONDecodeError:
+        try:
+            corrupt = path.with_name(
+                f"{path.name}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            )
+            path.rename(corrupt)
+            print(f"[yolo] corrupt progress file preserved at {corrupt}", file=sys.stderr)
+        except OSError:
+            pass
+        return {}
+    except (OSError, FileNotFoundError):
         return {}
 
 
@@ -189,21 +207,22 @@ def save(path: Path, data: ProgressData) -> None:
 
 
 def _compute_cr(tasks: list[TaskEntry]) -> tuple[int, int, int]:
-    """Compute completed count, remaining count, and percent from task array.
+    """Compute completed count, total count, and percent from task array.
+
+    r is the TOTAL number of tasks (completed + not_started + in_progress + aborted),
+    not the count of remaining tasks. This keeps r stable across the session life-cycle
+    so the statusline always shows X/total (e.g. 15/15 when all done).
 
     Args:
         tasks: Current task list for a session.
 
     Returns:
-        Tuple of (c, r, percent) where c = completed, r = not_started + in_progress,
-        percent is capped at 99 until the session is explicitly marked complete.
+        Tuple of (c, r, percent) where c = completed, r = total task count,
+        percent = round(c / r * 100), clamped to [0, 100].
     """
     c = sum(1 for t in tasks if t.get("status") == "completed")
-    r = sum(
-        1 for t in tasks if t.get("status") in ("not_started", "in_progress")
-    )
-    total = c + r
-    pct = min(99, round(c / total * 100)) if total > 0 else 0
+    r = len(tasks)
+    pct = round(c / r * 100) if r > 0 else 0
     return c, r, pct
 
 
@@ -276,26 +295,27 @@ def _get_or_create_entry(data: ProgressData, session_id: str) -> ProgressEntry:
     return data[session_id]
 
 
-def cmd_legacy_pulse(session_id: str, c: int, r: int, work_dir: Path) -> None:
+def cmd_legacy_pulse(session_id: str, c: int, r_remaining: int) -> None:
     """Write c/r/percent/updated without touching the task array.
 
+    CLI callers pass (completed, remaining); this function stores r as the total
+    (c + remaining) so the JSON semantic matches the task-mode convention.
     Used for no-task-mode sessions or backward compat callers.
 
     Args:
         session_id: Current session.
         c: Items completed.
-        r: Items remaining.
-        work_dir: Project root.
+        r_remaining: Items still remaining (not the total).
     """
-    total = c + r
-    pct = min(99, round(c / total * 100)) if total > 0 else 0
-    pfile = progress_file(work_dir)
+    total = c + r_remaining
+    pct = round(c / total * 100) if total > 0 else 0
+    pfile = progress_file()
     with _locked(pfile):
         data = load(pfile)
         entry = _get_or_create_entry(data, session_id)
         if not entry.get("tasks"):
             entry["c"] = c
-            entry["r"] = r
+            entry["r"] = total
             entry["percent"] = pct
         entry["updated"] = _now()
         save(pfile, data)
@@ -316,12 +336,12 @@ def cmd_init(
     Args:
         session_id: Current session.
         tasks_json_input: JSON string: array of {source_id, description}.
-        work_dir: Project root.
+        work_dir: Project root (recorded in work_dir field; not for file path).
     """
     raw_tasks = cast(
         list[dict[str, str]], json.loads(tasks_json_input)
     )
-    pfile = progress_file(work_dir)
+    pfile = progress_file()
     with _locked(pfile):
         data = load(pfile)
         if session_id in data:
@@ -368,7 +388,6 @@ def cmd_task_add(
     session_id: str,
     source_id: str,
     description: str,
-    work_dir: Path,
 ) -> None:
     """Append one newly-discovered task to this session.
 
@@ -378,9 +397,8 @@ def cmd_task_add(
         session_id: Current session.
         source_id: Stable identifier ('gh#42', 'todo:...', etc.).
         description: One-liner description.
-        work_dir: Project root.
     """
-    pfile = progress_file(work_dir)
+    pfile = progress_file()
     with _locked(pfile):
         data = load(pfile)
         entry = _get_or_create_entry(data, session_id)
@@ -426,9 +444,9 @@ def cmd_task_update(
         outcome: Outcome prose, or None to leave unchanged.
         commit_sha: Commit SHA to record, or None to leave unchanged.
         capture_diff: If True and commit_sha is set, run git diff --shortstat.
-        work_dir: Project root.
+        work_dir: Repository root for git operations.
     """
-    pfile = progress_file(work_dir)
+    pfile = progress_file()
     with _locked(pfile):
         data = load(pfile)
         if session_id not in data:
@@ -471,15 +489,14 @@ def cmd_task_update(
         save(pfile, data)
 
 
-def cmd_task_list(session_id: str, fmt: str, work_dir: Path) -> None:
+def cmd_task_list(session_id: str, fmt: str) -> None:
     """Print the current session's tasks to stdout.
 
     Args:
         session_id: Current session.
         fmt: Output format: 'json' or 'table'.
-        work_dir: Project root.
     """
-    pfile = progress_file(work_dir)
+    pfile = progress_file()
     data = load(pfile)
     entry = data.get(session_id, cast(ProgressEntry, {}))
     tasks: list[TaskEntry] = entry.get("tasks") or []
@@ -513,20 +530,21 @@ def cmd_task_list(session_id: str, fmt: str, work_dir: Path) -> None:
 def cmd_complete(
     session_id: str,
     abort_if_incomplete: bool,
-    work_dir: Path,
 ) -> None:
     """Mark this session as completed or aborted; set session_end.
 
-    Idempotent: if session_end is already set, updates status only if
-    the current status is 'in_flight'.
+    Once status is 'completed' the entry is frozen — further calls are no-ops.
+    Any non-completed status (in_flight, aborted) may still transition, and
+    session_end is updated alongside to record the actual transition time.
+    The entry is never deleted here — the SessionStart prune sweep handles
+    retention cleanup after 14 days.
 
     Args:
         session_id: Current session.
         abort_if_incomplete: If True, set status 'aborted' when any task is
             still in a non-terminal state; otherwise always set 'completed'.
-        work_dir: Project root.
     """
-    pfile = progress_file(work_dir)
+    pfile = progress_file()
     with _locked(pfile):
         data = load(pfile)
         if session_id not in data:
@@ -540,22 +558,20 @@ def cmd_complete(
             new_status: SessionStatus = "aborted" if incomplete else "completed"
         else:
             new_status = "completed"
-        if entry.get("status") != "completed":
+        if entry.get("status") == "in_flight":
             entry["status"] = new_status
-        if not entry.get("session_end"):
             entry["session_end"] = _now()
         entry["updated"] = _now()
         save(pfile, data)
 
 
-def cmd_remove(session_id: str, work_dir: Path) -> None:
+def cmd_remove(session_id: str) -> None:
     """Hard-delete this session's entry; delete the file if it becomes empty.
 
     Args:
         session_id: The session id to remove.
-        work_dir: Project root.
     """
-    pfile = progress_file(work_dir)
+    pfile = progress_file()
     with _locked(pfile):
         data = load(pfile)
         data.pop(session_id, None)
@@ -568,7 +584,6 @@ def cmd_remove(session_id: str, work_dir: Path) -> None:
 def cmd_prune(
     cutoff_completed_days: int,
     cutoff_inflight_days: int,
-    work_dir: Path,
 ) -> None:
     """Remove stale session entries according to retention policy.
 
@@ -580,9 +595,8 @@ def cmd_prune(
     Args:
         cutoff_completed_days: Days to retain sessions after session_end.
         cutoff_inflight_days: Days to keep idle in-flight sessions before aborting.
-        work_dir: Project root.
     """
-    pfile = progress_file(work_dir)
+    pfile = progress_file()
     if not pfile.exists():
         return
 
@@ -682,7 +696,7 @@ def main() -> None:
             p.add_argument("--source-id", required=True)
             p.add_argument("--description", required=True)
             a = p.parse_args(subargs)
-            cmd_task_add(session_id, a.source_id, a.description, resolve_work_dir())
+            cmd_task_add(session_id, a.source_id, a.description)
 
         elif subcommand == "task-update":
             p = argparse.ArgumentParser(prog="update_yolo_progress.py task-update")
@@ -709,23 +723,23 @@ def main() -> None:
             p = argparse.ArgumentParser(prog="update_yolo_progress.py task-list")
             p.add_argument("--format", choices=["json", "table"], default="json")
             a = p.parse_args(subargs)
-            cmd_task_list(session_id, a.format, resolve_work_dir())
+            cmd_task_list(session_id, a.format)
 
         elif subcommand == "complete":
             p = argparse.ArgumentParser(prog="update_yolo_progress.py complete")
             p.add_argument("--abort-if-incomplete", action="store_true")
             a = p.parse_args(subargs)
-            cmd_complete(session_id, a.abort_if_incomplete, resolve_work_dir())
+            cmd_complete(session_id, a.abort_if_incomplete)
 
         elif subcommand == "remove":
-            cmd_remove(session_id, resolve_work_dir())
+            cmd_remove(session_id)
 
         elif subcommand == "prune":
             p = argparse.ArgumentParser(prog="update_yolo_progress.py prune")
             p.add_argument("--cutoff-completed-days", type=int, default=14)
             p.add_argument("--cutoff-inflight-days", type=int, default=7)
             a = p.parse_args(subargs)
-            cmd_prune(a.cutoff_completed_days, a.cutoff_inflight_days, resolve_work_dir())
+            cmd_prune(a.cutoff_completed_days, a.cutoff_inflight_days)
 
     else:
         p = argparse.ArgumentParser(
@@ -741,9 +755,9 @@ def main() -> None:
         p.add_argument("r", type=int, nargs="?", metavar="R")
         a = p.parse_args(argv)
         if a.remove:
-            cmd_remove(session_id, resolve_work_dir())
+            cmd_remove(session_id)
         elif a.c is not None and a.r is not None:
-            cmd_legacy_pulse(session_id, a.c, a.r, resolve_work_dir())
+            cmd_legacy_pulse(session_id, a.c, a.r)
         else:
             p.error("provide C and R, or --remove, or a subcommand")
 

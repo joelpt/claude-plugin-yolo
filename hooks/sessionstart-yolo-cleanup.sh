@@ -18,9 +18,9 @@ cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)
 
 [[ -z "$cwd" ]] && exit 0
 
-project_dir=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")
+[[ -f "$helper_dst" ]] || exit 0
 
-python3 "$helper_dst" --work-dir "$project_dir" prune \
+python3 "$helper_dst" prune \
     --cutoff-completed-days 14 \
     --cutoff-inflight-days 7 \
     2>/dev/null || true

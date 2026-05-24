@@ -18,17 +18,29 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "bin"))
 
-import update_yolo_progress  # noqa: E402  (sys.path injection)
+import update_yolo_progress  # noqa: E402  # type: ignore[import]  (sys.path injection)
 
 SESSION = "test-session-abc123"
 OTHER_SESSION = "other-session-xyz789"
 
 
-def _run(tmp_root: Path, *argv: str, session_id: str = SESSION) -> int:
-    """Run main() with patched git_root, env, and sys.argv; return exit code.
+def _pfile(tmp_root: Path) -> Path:
+    """Return the fake global progress file path under tmp_root.
 
     Args:
-        tmp_root: Temporary directory used as the fake git root.
+        tmp_root: Temporary directory used as a stand-in for ~/.claude's parent.
+
+    Returns:
+        Path to tmp_root/.claude/yolo-progress.json.
+    """
+    return tmp_root / ".claude" / "yolo-progress.json"
+
+
+def _run(tmp_root: Path, *argv: str, session_id: str = SESSION) -> int:
+    """Run main() with patched progress_file, env, and sys.argv; return exit code.
+
+    Args:
+        tmp_root: Temporary directory; progress_file() is patched to write here.
         *argv: Command-line arguments after the program name.
         session_id: Value to inject as CLAUDE_CODE_SESSION_ID.
 
@@ -36,7 +48,10 @@ def _run(tmp_root: Path, *argv: str, session_id: str = SESSION) -> int:
         The process exit code (0 on success).
     """
     with (
-        patch("update_yolo_progress.git_root", return_value=tmp_root),
+        patch(
+            "update_yolo_progress.progress_file",
+            return_value=_pfile(tmp_root),
+        ),
         patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": session_id}),
         patch("sys.argv", ["upd"] + list(argv)),
     ):
@@ -51,12 +66,12 @@ def _load(tmp_root: Path) -> dict[str, Any]:
     """Load the yolo-progress.json from tmp_root/.claude/.
 
     Args:
-        tmp_root: Fake git root directory.
+        tmp_root: Temporary directory holding the fake progress file.
 
     Returns:
         Parsed JSON dict, or {} if the file is absent.
     """
-    pfile = tmp_root / ".claude" / "yolo-progress.json"
+    pfile = _pfile(tmp_root)
     if not pfile.exists():
         return {}
     return cast_dict(json.loads(pfile.read_text()))
@@ -115,10 +130,10 @@ class LegacyPulseTests(unittest.TestCase):
         self.assertIn(OTHER_SESSION, data)
         self.assertIn(SESSION, data)
 
-    def test_percent_cap_at_99_when_nothing_remains(self) -> None:
+    def test_percent_100_when_nothing_remains(self) -> None:
         _run(self.root, "5", "0")
         data = _load(self.root)
-        self.assertEqual(data[SESSION]["percent"], 99)
+        self.assertEqual(data[SESSION]["percent"], 100)
 
     def test_percent_zero_when_no_work_counted(self) -> None:
         _run(self.root, "0", "0")
@@ -141,7 +156,10 @@ class LegacyPulseTests(unittest.TestCase):
     def test_legacy_pulse_does_not_overwrite_task_cr(self) -> None:
         tasks = [{"source_id": "gh#1", "description": "thing"}]
         with (
-            patch("update_yolo_progress.git_root", return_value=self.root),
+            patch(
+                "update_yolo_progress.progress_file",
+                return_value=_pfile(self.root),
+            ),
             patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": SESSION}),
             patch("sys.argv", ["upd", "init"]),
             patch("sys.stdin") as mock_stdin,
@@ -171,7 +189,7 @@ class RemoveTests(unittest.TestCase):
     def test_flag_remove_deletes_file_when_last_entry(self) -> None:
         _run(self.root, "2", "3")
         _run(self.root, "--remove")
-        self.assertFalse((self.root / ".claude" / "yolo-progress.json").exists())
+        self.assertFalse(_pfile(self.root).exists())
 
     def test_flag_remove_preserves_other_sessions(self) -> None:
         _run(self.root, "1", "1", session_id=OTHER_SESSION)
@@ -200,7 +218,10 @@ class NoSessionIdTests(unittest.TestCase):
 
     def test_no_session_id_exits_zero_without_writing(self) -> None:
         with (
-            patch("update_yolo_progress.git_root", return_value=self.root),
+            patch(
+                "update_yolo_progress.progress_file",
+                return_value=_pfile(self.root),
+            ),
             patch.dict("os.environ", {}, clear=True),
             patch("sys.argv", ["upd", "2", "3"]),
         ):
@@ -220,7 +241,10 @@ class InitTests(unittest.TestCase):
 
     def _init(self, tasks: list[dict[str, str]]) -> None:
         with (
-            patch("update_yolo_progress.git_root", return_value=self.root),
+            patch(
+                "update_yolo_progress.progress_file",
+                return_value=_pfile(self.root),
+            ),
             patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": SESSION}),
             patch("sys.argv", ["upd", "init"]),
             patch("sys.stdin") as mock_stdin,
@@ -312,7 +336,7 @@ class TaskUpdateTests(unittest.TestCase):
         _run(self.root, "task-update", "--tid", "t1", "--status", "completed")
         data = _load(self.root)[SESSION]
         self.assertEqual(data["c"], 1)
-        self.assertEqual(data["r"], 1)
+        self.assertEqual(data["r"], 2)  # r = total tasks (2), not remaining
         task = data["tasks"][0]
         self.assertIsNotNone(task.get("completed_at"))
 
@@ -344,10 +368,10 @@ class TaskUpdateTests(unittest.TestCase):
         self.assertEqual(task["lines_added"], 10)
         self.assertEqual(task["lines_deleted"], 3)
 
-    def test_aborted_status_reduces_r(self) -> None:
+    def test_aborted_task_does_not_change_r(self) -> None:
         _run(self.root, "task-update", "--tid", "t1", "--status", "aborted")
         data = _load(self.root)[SESSION]
-        self.assertEqual(data["r"], 1)
+        self.assertEqual(data["r"], 2)  # total stays 2; aborted still counts
         self.assertEqual(data["c"], 0)
 
 
@@ -413,6 +437,13 @@ class CompleteTests(unittest.TestCase):
         entry = _load(self.root)[SESSION]
         self.assertEqual(entry["status"], "completed")
 
+    def test_complete_does_not_flip_aborted_to_completed(self) -> None:
+        """Verify aborted status is terminal and cannot be overwritten by complete."""
+        _run(self.root, "complete", "--abort-if-incomplete")
+        self.assertEqual(_load(self.root)[SESSION]["status"], "aborted")
+        _run(self.root, "complete")
+        self.assertEqual(_load(self.root)[SESSION]["status"], "aborted")
+
     def test_complete_is_idempotent(self) -> None:
         _run(self.root, "complete")
         first_end = _load(self.root)[SESSION]["session_end"]
@@ -423,6 +454,15 @@ class CompleteTests(unittest.TestCase):
     def test_complete_does_not_delete_entry(self) -> None:
         _run(self.root, "complete")
         self.assertIn(SESSION, _load(self.root))
+
+    def test_complete_cr_shows_done_state(self) -> None:
+        _run(self.root, "task-update", "--tid", "t1", "--status", "completed")
+        _run(self.root, "task-update", "--tid", "t2", "--status", "completed")
+        _run(self.root, "complete")
+        entry = _load(self.root)[SESSION]
+        self.assertEqual(entry["c"], 2)
+        self.assertEqual(entry["r"], 2)  # 2/2 visible after completion, not blanked out
+        self.assertEqual(entry["percent"], 100)
 
 
 class PruneTests(unittest.TestCase):
@@ -440,7 +480,7 @@ class PruneTests(unittest.TestCase):
         session_end: str | None = None,
         updated: str = "2020-01-01T00:00:00Z",
     ) -> None:
-        pfile = self.root / ".claude" / "yolo-progress.json"
+        pfile = _pfile(self.root)
         pfile.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, object] = {}
         if pfile.exists():
@@ -464,7 +504,7 @@ class PruneTests(unittest.TestCase):
         self.assertNotIn(SESSION, _load(self.root))
 
     def test_prune_keeps_recent_completed_sessions(self) -> None:
-        from update_yolo_progress import _now
+        from update_yolo_progress import _now  # type: ignore[import]
         self._write_entry(SESSION, "completed", session_end=_now())
         _run(self.root, "prune", "--cutoff-completed-days", "14", "--cutoff-inflight-days", "7")
         self.assertIn(SESSION, _load(self.root))
@@ -477,7 +517,7 @@ class PruneTests(unittest.TestCase):
         self.assertEqual(data[SESSION]["status"], "aborted")
 
     def test_prune_keeps_active_inflight_sessions(self) -> None:
-        from update_yolo_progress import _now
+        from update_yolo_progress import _now  # type: ignore[import]
         self._write_entry(SESSION, "in_flight", updated=_now())
         _run(self.root, "prune", "--cutoff-completed-days", "14", "--cutoff-inflight-days", "7")
         self.assertIn(SESSION, _load(self.root))
@@ -492,7 +532,7 @@ class PruneTests(unittest.TestCase):
         self.assertNotIn(f"{SESSION}#1", _load(self.root))
 
     def test_prune_keeps_recent_archived_entries(self) -> None:
-        from update_yolo_progress import _now
+        from update_yolo_progress import _now  # type: ignore[import]
         self._write_entry(
             f"{SESSION}#1",
             "completed",
@@ -502,24 +542,55 @@ class PruneTests(unittest.TestCase):
         self.assertIn(f"{SESSION}#1", _load(self.root))
 
 
-class WorkDirTests(unittest.TestCase):
-    """Tests for the --work-dir global flag."""
+class GlobalProgressFileTests(unittest.TestCase):
+    """Verify that progress_file() always returns the global ~/.claude path."""
 
-    def setUp(self) -> None:
-        self.tmp = TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+    def test_progress_file_returns_home_dot_claude(self) -> None:
+        expected = Path.home() / ".claude" / "yolo-progress.json"
+        self.assertEqual(update_yolo_progress.progress_file(), expected)
 
-    def test_work_dir_flag_overrides_git_root(self) -> None:
-        other = Path(self.tmp.name) / "other"
-        other.mkdir()
-        with (
-            patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": SESSION}),
-            patch("sys.argv", ["upd", "--work-dir", str(other), "2", "3"]),
-        ):
-            update_yolo_progress.main()
-        self.assertFalse((self.root / ".claude" / "yolo-progress.json").exists())
-        self.assertTrue((other / ".claude" / "yolo-progress.json").exists())
+    def test_extract_work_dir_space_form(self) -> None:
+        wd, rest = update_yolo_progress._extract_work_dir(
+            ["--work-dir", "/some/path", "task-add", "--source-id", "gh#1"]
+        )
+        self.assertEqual(wd, Path("/some/path"))
+        self.assertEqual(rest, ["task-add", "--source-id", "gh#1"])
+
+    def test_extract_work_dir_equals_form(self) -> None:
+        wd, rest = update_yolo_progress._extract_work_dir(
+            ["--work-dir=/other/path", "init"]
+        )
+        self.assertEqual(wd, Path("/other/path"))
+        self.assertEqual(rest, ["init"])
+
+    def test_extract_work_dir_absent(self) -> None:
+        wd, rest = update_yolo_progress._extract_work_dir(["2", "3"])
+        self.assertIsNone(wd)
+        self.assertEqual(rest, ["2", "3"])
+
+
+class LoadCorruptionTests(unittest.TestCase):
+    """Verify that load() preserves corrupt files instead of silently wiping them."""
+
+    def test_corrupt_file_is_renamed_not_silently_wiped(self) -> None:
+        """Confirm JSONDecodeError renames the bad file to a .corrupt-* sibling."""
+        with TemporaryDirectory() as tmp:
+            pfile = Path(tmp) / ".claude" / "yolo-progress.json"
+            pfile.parent.mkdir(parents=True)
+            pfile.write_text("{bad json")
+
+            result = update_yolo_progress.load(pfile)
+
+            self.assertEqual(result, {})
+            self.assertFalse(pfile.exists(), "corrupt original should be renamed away")
+            siblings = list(pfile.parent.glob("yolo-progress.json.corrupt-*"))
+            self.assertEqual(len(siblings), 1, "exactly one .corrupt-* file should exist")
+
+    def test_missing_file_returns_empty_dict(self) -> None:
+        """Confirm that a missing file returns {} without raising."""
+        with TemporaryDirectory() as tmp:
+            pfile = Path(tmp) / ".claude" / "yolo-progress.json"
+            self.assertEqual(update_yolo_progress.load(pfile), {})
 
 
 if __name__ == "__main__":
