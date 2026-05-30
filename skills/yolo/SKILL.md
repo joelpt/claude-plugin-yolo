@@ -1,6 +1,6 @@
 ---
 name: yolo
-description: Autonomous work mode — work all pending items (GitHub issues, TODO.md, PLAN.md) sequentially without pausing for decisions, committing as you go. Invoke when user says /yolo, "go autonomous", "work everything", or "keep going until done".
+description: Work all pending items autonomously
 ---
 
 ## Autonomous Mode Instructions
